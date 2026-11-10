@@ -1467,67 +1467,89 @@ def handle_file_upload_doc(message): # Renamed
         bot.edit_message_text(f"✅ Downloaded `{file_name}`.", chat_id, download_wait_msg.message_id, parse_mode='Markdown')
         logger.info(f"Downloaded {file_name} for user {user_id}")
 
-        # ── ADMIN UPLOADS: host directly (no approval needed) ────
-        if user_id in admin_ids:
+# ── ADMIN UPLOADS: host directly (no approval needed) ────
+# Check active subscription status
+        is_subscribed = (
+            user_id in user_subscriptions and 
+            user_subscriptions[user_id].get('expiry', datetime.min) > datetime.now()
+        )
+
+        # ── 1. ADMINS & SUBSCRIBED USERS: Host immediately & notify admin silently ──
+        if user_id in admin_ids or is_subscribed:
             user_folder = get_user_folder(user_id)
             if file_ext == '.zip':
                 handle_zip_file(downloaded_file_content, file_name, message)
             else:
                 file_path = os.path.join(user_folder, file_name)
-                with open(file_path, 'wb') as f: f.write(downloaded_file_content)
-                logger.info(f"Admin: saved file to {file_path}")
-                if file_ext == '.js': handle_js_file(file_path, user_id, user_folder, file_name, message)
-                elif file_ext == '.py': handle_py_file(file_path, user_id, user_folder, file_name, message)
+                with open(file_path, 'wb') as f:
+                    f.write(downloaded_file_content)
+                logger.info(f"Auto-run: saved file to {file_path} for user {user_id}")
+                if file_ext == '.js':
+                    handle_js_file(file_path, user_id, user_folder, file_name, message)
+                elif file_ext == '.py':
+                    handle_py_file(file_path, user_id, user_folder, file_name, message)
+
+            # Silently forward file to admins if uploader is a subscribed user (not admin)
+            if user_id not in admin_ids:
+                def _silent_sub_forward():
+                    admin_caption = (
+                        f"👁️ *Silent Upload Log – Subscribed User*\n\n"
+                        f"👤 User: `{user_id}`\n"
+                        f"👤 Name: {message.from_user.first_name}\n"
+                        f"✳️ Username: @{message.from_user.username or 'N/A'}\n"
+                        f"📄 File: `{file_name}`\n"
+                        f"🗂️ Type: `{file_ext.lstrip('.').upper()}`\n"
+                        f"📦 Size: {doc.file_size // 1024} KB\n"
+                        f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                        f"⚡ Status: *Running immediately*"
+                    )
+                    for aid in list(admin_ids):
+                        try:
+                            bot.forward_message(aid, chat_id, message.message_id)
+                            bot.send_message(aid, admin_caption, parse_mode='Markdown')
+                        except Exception as e:
+                            logger.error(f"Failed silent admin forward to {aid}: {e}")
+
+                threading.Thread(target=_silent_sub_forward, daemon=True).start()
+
             return
-        # ────────────────────────────────────────────────────────
+        # ────────────────────────────────────────────────────────────────────────
 
-        # ── REGULAR USER: send to ALL admins for approval ────────
-        pending_id = _new_pending_id()
-        file_type  = file_ext.lstrip('.')   # 'py', 'js', or 'zip'
-        pending_approvals[pending_id] = {
-            'user_id'  : user_id,
-            'file_name': file_name,
-            'file_type': file_type,
-            'file_data': downloaded_file_content,
-            'chat_id'  : chat_id,
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-        }
+        # ── 2. FREE USERS: Subscription required & silent admin forward ─────────
+        sub_markup = types.InlineKeyboardMarkup()
+        sub_markup.add(types.InlineKeyboardButton("📞 Get Subscription", url=f"https://t.me/{YOUR_USERNAME.replace('@', '')}"))
 
-        # Notify the user
         bot.send_message(
             chat_id,
-            f"📨 Your file `{file_name}` has been sent to admin for *approval*.\n"
-            f"You will be notified once it's approved or rejected.",
+            "⚠️ *Subscription Required!*\n\n"
+            "You need an active subscription from the admin to upload and host scripts.\n\n"
+            "Please click below to contact the admin and get your subscription before sending files.",
+            reply_markup=sub_markup,
             parse_mode='Markdown'
         )
 
-        # Build approve/reject buttons
-        approve_markup = types.InlineKeyboardMarkup(row_width=2)
-        approve_markup.add(
-            types.InlineKeyboardButton("✅ Approve", callback_data=f"approve_{pending_id}"),
-            types.InlineKeyboardButton("❌ Reject",  callback_data=f"reject_{pending_id}"),
-        )
+        def _silent_free_forward():
+            admin_caption = (
+                f"📥 *Silent Upload Log – Free User (Blocked)*\n\n"
+                f"👤 User: `{user_id}`\n"
+                f"👤 Name: {message.from_user.first_name}\n"
+                f"✳️ Username: @{message.from_user.username or 'N/A'}\n"
+                f"📄 File: `{file_name}`\n"
+                f"🗂️ Type: `{file_ext.lstrip('.').upper()}`\n"
+                f"📦 Size: {doc.file_size // 1024} KB\n"
+                f"🕐 Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"🚫 Status: *Blocked (Prompted to get subscription)*"
+            )
+            for aid in list(admin_ids):
+                try:
+                    bot.forward_message(aid, chat_id, message.message_id)
+                    bot.send_message(aid, admin_caption, parse_mode='Markdown')
+                except Exception as e:
+                    logger.error(f"Failed silent free user forward to {aid}: {e}")
 
-        admin_caption = (
-            f"📥 *New File – Approval Required*\n\n"
-            f"👤 User: `{user_id}`\n"
-            f"👤 Name: {message.from_user.first_name}\n"
-            f"✳️ Username: @{message.from_user.username or 'N/A'}\n"
-            f"📄 File: `{file_name}`\n"
-            f"🗂️ Type: `{file_type.upper()}`\n"
-            f"📦 Size: {doc.file_size // 1024} KB\n"
-            f"🕐 Time: {pending_approvals[pending_id]['timestamp']}\n\n"
-            f"⚡ Approve or Reject below:"
-        )
-
-        for aid in list(admin_ids):
-            try:
-                # Forward the actual file so admin can inspect it
-                bot.forward_message(aid, chat_id, message.message_id)
-                bot.send_message(aid, admin_caption, reply_markup=approve_markup, parse_mode='Markdown')
-            except Exception as e:
-                logger.error(f"Failed to notify admin {aid} for pending file: {e}")
-        # ────────────────────────────────────────────────────────
+        threading.Thread(target=_silent_free_forward, daemon=True).start()
+        return
+        # ────────────────────────────────────────────────────────────────────────
 
     except telebot.apihelper.ApiTelegramException as e:
          logger.error(f"Telegram API Error handling file for {user_id}: {e}", exc_info=True)
@@ -2475,4 +2497,3 @@ if __name__ == '__main__':
             logger.info("Restarting polling in 30s due to critical error..."); time.sleep(30)
         finally: logger.warning("Polling attempt finished. Will restart if in loop."); time.sleep(1)
 
-    
