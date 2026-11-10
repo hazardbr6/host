@@ -1,0 +1,8 @@
+pyTelegramBotAPI
+requests
+urllib3
+playwright
+speedtest-cli
+psutil
+Flask
+wireguard
